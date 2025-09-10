@@ -6,14 +6,11 @@ function parseColorCodes(line: string) {
     const parts: React.ReactNode[] = [];
     let lastIndex = 0;
     let match: RegExpExecArray | null;
-    let first = true;
 
     while ((match = regex.exec(line)) !== null) {
         // Add text before the match
         if (match.index > lastIndex) {
-            // On first run, don't subtract 1; on others, do
-            const sliceEnd = first ? match.index : match.index - 1;
-            parts.push(line.slice(lastIndex, sliceEnd));
+            parts.push(line.slice(lastIndex, match.index));
         }
         // Add colored word (without the #)
         if (match[2]) {
@@ -24,13 +21,16 @@ function parseColorCodes(line: string) {
             );
         }
         lastIndex = regex.lastIndex;
-        first = false;
     }
     // Add remaining text
     if (lastIndex < line.length) {
         parts.push(line.slice(lastIndex));
     }
-    return parts;
+
+    // Join parts and remove any stray '#' characters
+    return parts.map(part =>
+        typeof part === "string" ? part.replace(/#/g, "") : part
+    );
 }
 
 const Terminal = ({

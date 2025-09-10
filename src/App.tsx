@@ -1,176 +1,441 @@
-import { useEffect, useState } from "react";
+import { useState, useEffect } from "react";
 import { Client, Hint, MessageNode } from "archipelago.js";
 import Terminal from "./Terminal";
 import { ColorCodes } from "./statics";
 
+interface Tab {
+  id: number;
+  name: string;
+  serverUrl: string;
+  username: string;
+  password: string;
+  terminalLines: string[];
+  hints: Hint[];
+  client: Client | null;
+  connectButtonText: string;
+  terminalData: string;
+}
+
+const LOCAL_STORAGE_KEY = "archipelago_tabs";
+
 const App = () => {
-  const [client, setClient] = useState<Client | null>(null);
-  const [serverUrl, setServerUrl] = useState("");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [terminalData, setTerminalData] = useState<string>("");
-  const [terminalLines, setTerminalLines] = useState<string[]>([]);
-  const [hints, setHints] = useState<Hint[]>([]);
-  const [connectButtonText, setConnectButtonText] = useState("Connect");
-
-  useEffect(() => {
-    if (!client) {
-      setClient(new Client());
+  const [tabs, setTabs] = useState<Tab[]>(() => {
+    const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        // Ensure client is null on load
+        return parsed.map((tab: any) => ({ ...tab, client: null }));
+      } catch {
+        return [
+          {
+            id: 1,
+            name: "Tab 1",
+            serverUrl: "",
+            username: "",
+            password: "",
+            terminalLines: [],
+            hints: [],
+            client: null,
+            connectButtonText: "Connect",
+            terminalData: "",
+          },
+        ];
+      }
     }
-  }, []);
+    return [
+      {
+        id: 1,
+        name: "Tab 1",
+        serverUrl: "",
+        username: "",
+        password: "",
+        terminalLines: [],
+        hints: [],
+        client: null,
+        connectButtonText: "Connect",
+        terminalData: "",
+      },
+    ];
+  });
+  const [activeTabId, setActiveTabId] = useState<number>(1);
 
-  useEffect(() => {
-    if (!client) return;
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
-    const handleMessage = (_: string, nodes: MessageNode[]) => {
-      console.log("Received message:", nodes);
-      const line = nodes
-        .map((node) => {
-          let color: string | undefined;
-          let text: string = node.text ?? "";
+  const handleTabChange = (id: number) => {
+    setActiveTabId(id);
+  };
 
-          if (node.type === "color" && node.color && node.text) {
-            color = node.color.toUpperCase();
-          } else if (node.type === "player" && node.player.slot === client.players.self.slot) {
-            color = ColorCodes.MAGENTA;
-          } else if (node.type === "item" && node.item.useful) {
-            color = ColorCodes.SLATEBLUE;
-          } else if (node.type === "item" && node.item.progression) {
-            color = ColorCodes.PLUM;
-          } else if (node.type === "item" && node.item.trap) {
-            color = ColorCodes.RED;
-          } else if (node.type === "location") {
-            color = ColorCodes.GREEN;
-          }
-
-          if (color) {
-            return text
-              .split(" ")
-              .map((word) => word ? `#${color}${word}` : "")
-              .join(" ");
-          }
-          return text;
-        })
-        .join("");
-      setTerminalLines((prev) => [...prev, line]);
+  const handleAddTab = () => {
+    const newTab: Tab = {
+      id: tabs.length + 1,
+      name: `Tab ${tabs.length + 1}`,
+      serverUrl: "",
+      username: "",
+      password: "",
+      terminalLines: [],
+      hints: [],
+      client: null,
+      connectButtonText: "Connect",
+      terminalData: "",
     };
-    const handleHints = (hint: Hint[]) => {
-      setHints(hint);
-    };
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+  };
 
-    client.messages.on("message", handleMessage);
-    client.items.on("hintsInitialized", handleHints);
-    client.items.on("hintFound", (hint: Hint) => {
-      setHints((prev) => {
-        const idx = prev.findIndex((h) => h.item.id === hint.item.id);
-        if (idx !== -1) {
-          // Update existing hint
-          return prev.map((h) => (h.item.id === hint.item.id ? hint : h));
-        } else {
-          // Add new hint
-          return [...prev, hint];
-        }
-      });
-    });
-
-    return () => {
-      client.messages.off("message", handleMessage);
-      client.items.off("hintsInitialized", handleHints);
-    };
-  }, [client]);
-
-  const handleConnectButton = () => {
-    if (client && client.socket.connected) {
-      client.socket.disconnect();
-      setConnectButtonText("Connect");
-      setHints([]);
-      setTerminalLines([]);
-    } else {
-      client?.login(
-        serverUrl,
-        username,
-        undefined,
-        {
-          slotData: false,
-          password: password,
-        }
-      )
-        .then(() => {
-          setConnectButtonText("Disconnect");
-        })
-        .catch((error) => {
-          setTerminalLines((prev) => [
-            ...prev,
-            "Failed to connect to Archipelago server: " + error,
-          ]);
-        });
+  const handleRemoveTab = (id: number) => {
+    setTabs((prev) => prev.filter((tab) => tab.id !== id));
+    if (activeTabId === id && tabs.length > 1) {
+      setActiveTabId(tabs[0].id);
     }
   };
 
+  const handleRenameTab = (id: number, newName: string) => {
+    setTabs((prev) =>
+      prev.map((tab) => (tab.id === id ? { ...tab, name: newName } : tab))
+    );
+  };
+
+  const handleConnectButton = (id: number) => {
+    setTabs((prev) =>
+      prev.map((tab) => {
+        if (tab.id === id) {
+          // Disconnect if already connected
+          if (tab.client && tab.client.socket.connected) {
+            tab.client.socket.disconnect();
+            return {
+              ...tab,
+              connectButtonText: "Connect",
+              hints: [],
+              terminalLines: [],
+            };
+          }
+
+          // If client exists but is disconnected, reconnect
+          if (tab.client && !tab.client.socket.connected) {
+            tab.client
+              .login(tab.serverUrl, tab.username, undefined, {
+                slotData: false,
+                password: tab.password,
+              })
+              .then(() => {
+                setTabs((prev) =>
+                  prev.map((t) =>
+                    t.id === id
+                      ? { ...t, connectButtonText: "Disconnect" }
+                      : t
+                  )
+                );
+              })
+              .catch((error) => {
+                setTabs((prev) =>
+                  prev.map((t) =>
+                    t.id === id
+                      ? {
+                          ...t,
+                          terminalLines: [
+                            ...t.terminalLines,
+                            "Failed to connect: " + error,
+                          ],
+                        }
+                      : t
+                  )
+                );
+              });
+            return tab;
+          }
+
+          // Otherwise, create a new client and attach listeners
+          const client = new Client();
+          if (!(client as any)._listenersAdded) {
+            (client as any)._listenersAdded = true;
+            client.messages.on(
+              "message",
+              (_message: string, nodes: MessageNode[]) => {
+                const line = nodes
+                  .map((node) => {
+                    let color;
+                    let text = node.text ?? "";
+
+                    if (node.type === "color" && node.color && node.text) {
+                      color = node.color.toUpperCase();
+                    } else if (
+                      node.type === "player" &&
+                      node.player.slot === client.players.self.slot
+                    ) {
+                      color = ColorCodes.MAGENTA;
+                    } else if (node.type === "player") {
+                      color = ColorCodes.YELLOW;
+                    } else if (node.type === "item" && node.item.useful) {
+                      color = ColorCodes.SLATEBLUE;
+                    } else if (node.type === "item" && node.item.progression) {
+                      color = ColorCodes.PLUM;
+                    } else if (node.type === "item" && node.item.trap) {
+                      color = ColorCodes.RED;
+                    } else if (node.type === "item") {
+                      color = ColorCodes.CYAN;
+                    } else if (node.type === "location") {
+                      color = ColorCodes.GREEN;
+                    }
+
+                    if (color) {
+                      return text
+                        .split(" ")
+                        .map((word) => (word ? `#${color}${word}` : ""))
+                        .join(" ");
+                    }
+                    return text;
+                  })
+                  .join("");
+                setTabs((prev) =>
+                  prev.map((t) =>
+                    t.id === id
+                      ? { ...t, terminalLines: [...t.terminalLines, line] }
+                      : t
+                  )
+                );
+              }
+            );
+
+            client.items.on("hintsInitialized", (hints: Hint[]) => {
+              setTabs((prev) =>
+                prev.map((t) =>
+                  t.id === id ? { ...t, hints } : t
+                )
+              );
+            });
+          }
+          client
+            .login(tab.serverUrl, tab.username, undefined, {
+              slotData: false,
+              password: tab.password,
+            })
+            .then(() => {
+              setTabs((prev) =>
+                prev.map((t) =>
+                  t.id === id
+                    ? { ...t, client, connectButtonText: "Disconnect" }
+                    : t
+                )
+              );
+            })
+            .catch((error) => {
+              setTabs((prev) =>
+                prev.map((t) =>
+                  t.id === id
+                    ? {
+                        ...t,
+                        terminalLines: [
+                          ...t.terminalLines,
+                          "Failed to connect: " + error,
+                        ],
+                      }
+                    : t
+                )
+              );
+            });
+          return { ...tab, client };
+        }
+        return tab;
+      })
+    );
+  };
+
+  // Save tabs to localStorage whenever they change (excluding client)
+  useEffect(() => {
+    const tabsToSave = tabs.map(({ client, ...rest }) => rest);
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(tabsToSave));
+  }, [tabs]);
+
+  // Auto-reconnect tabs with connection info but no client
+  useEffect(() => {
+    tabs.forEach((tab) => {
+      if (
+        !tab.client &&
+        tab.serverUrl &&
+        tab.username &&
+        tab.password &&
+        tab.connectButtonText === "Connect"
+      ) {
+        handleConnectButton(tab.id);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div>
-      {/* Options Menu */}
-      <div style={{ display: "flex", justifyContent: "center", alignItems: "center", width: "100%" }}>
-        <div style={{ padding: "24px", display: "flex", flexDirection: "column", gap: "16px", maxWidth: "400px", width: "100%" }}>
-          {(!client || !client.socket.connected) && (
-            <>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <label htmlFor="ap-server-url" style={{ minWidth: "110px" }}>Server URL</label>
-                <input
-                  id="ap-server-url"
-                  name="ap-server-url"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="off"
-                  spellCheck="false"
-                  type="text"
-                  placeholder="Enter your AP Server URL"
-                  onChange={(e) => setServerUrl(e.target.value)}
-                  style={{ flex: 1, padding: "6px 10px" }}
-                />
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <label htmlFor="ap-server-username" style={{ minWidth: "110px" }}>Slot Name</label>
-                <input
-                  id="ap-server-username"
-                  name="ap-server-username"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="off"
-                  spellCheck="false"
-                  type="text"
-                  placeholder="Username"
-                  onChange={(e) => setUsername(e.target.value)}
-                  style={{ flex: 1, padding: "6px 10px" }}
-                />
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                <label htmlFor="ap-server-password" style={{ minWidth: "110px" }}>Password</label>
-                <input
-                  id="ap-server-password"
-                  name="ap-server-password"
-                  autoComplete="off"
-                  autoCorrect="off"
-                  autoCapitalize="off"
-                  spellCheck="false"
-                  type="password"
-                  placeholder="Password"
-                  onChange={(e) => setPassword(e.target.value)}
-                  style={{ flex: 1, padding: "6px 10px" }}
-                />
-              </div>
-            </>
-          )}
-          <button
-            onClick={handleConnectButton}
-            style={{ marginTop: "8px", padding: "8px 0", fontWeight: "bold", cursor: "pointer" }}
+      {/* Tab Bar */}
+      <div style={{ display: "flex", gap: "8px", padding: "8px", overflowX: "auto" }}>
+        {tabs.map((tab) => (
+          <div
+            key={tab.id}
+            onClick={() => handleTabChange(tab.id)}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "4px",
+              padding: "8px 16px",
+              cursor: "pointer",
+              background: tab.id === activeTabId ? "#444" : "#222",
+              color: "#fff",
+              borderRadius: "4px",
+              flexShrink: 0,
+            }}
           >
-            {connectButtonText}
-          </button>
-        </div>
+            <span
+              contentEditable
+              suppressContentEditableWarning
+              onBlur={(e) => handleRenameTab(tab.id, e.target.textContent || tab.name)}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "#fff",
+                outline: "none",
+                fontSize: "1rem",
+                textAlign: "center",
+                cursor: "text",
+              }}
+            >
+              {tab.name}
+            </span>
+          </div>
+        ))}
+        <button
+          onClick={handleAddTab}
+          style={{
+            padding: "8px 16px",
+            cursor: "pointer",
+            background: "#444",
+            color: "#fff",
+            borderRadius: "4px",
+            border: "none",
+            fontSize: "16px",
+            flexShrink: 0,
+          }}
+        >
+          +
+        </button>
       </div>
-      {client && client.socket.connected && (
-        <>
+
+      {activeTab && (
+        <div>
+          {/* Connection Settings */}
+          <div style={{ padding: "16px" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {/* Tab Name Input */}
+              <input
+                type="text"
+                placeholder="Tab Name"
+                value={activeTab.name}
+                onChange={(e) =>
+                  setTabs((prev) =>
+                    prev.map((tab) =>
+                      tab.id === activeTabId
+                        ? { ...tab, name: e.target.value }
+                        : tab
+                    )
+                  )
+                }
+                style={{
+                  padding: "10px",
+                  border: "1px solid #333",
+                  borderRadius: "4px",
+                  background: "#23272e",
+                  color: "#fff",
+                  fontSize: "1rem",
+                  outline: "none",
+                  marginBottom: "8px",
+                }}
+              />
+              <input
+                type="text"
+                placeholder="Server URL"
+                value={activeTab.serverUrl}
+                onChange={(e) =>
+                  setTabs((prev) =>
+                    prev.map((tab) =>
+                      tab.id === activeTabId
+                        ? { ...tab, serverUrl: e.target.value }
+                        : tab
+                    )
+                  )
+                }
+                style={{
+                  padding: "10px",
+                  border: "1px solid #333",
+                  borderRadius: "4px",
+                  background: "#23272e",
+                  color: "#fff",
+                  fontSize: "1rem",
+                  outline: "none",
+                }}
+              />
+              <input
+                type="text"
+                placeholder="Username"
+                value={activeTab.username}
+                onChange={(e) =>
+                  setTabs((prev) =>
+                    prev.map((tab) =>
+                      tab.id === activeTabId
+                        ? { ...tab, username: e.target.value }
+                        : tab
+                    )
+                  )
+                }
+                style={{
+                  padding: "10px",
+                  border: "1px solid #333",
+                  borderRadius: "4px",
+                  background: "#23272e",
+                  color: "#fff",
+                  fontSize: "1rem",
+                  outline: "none",
+                }}
+              />
+              <input
+                type="password"
+                placeholder="Password"
+                value={activeTab.password}
+                onChange={(e) =>
+                  setTabs((prev) =>
+                    prev.map((tab) =>
+                      tab.id === activeTabId
+                        ? { ...tab, password: e.target.value }
+                        : tab
+                    )
+                  )
+                }
+                style={{
+                  padding: "10px",
+                  border: "1px solid #333",
+                  borderRadius: "4px",
+                  background: "#23272e",
+                  color: "#fff",
+                  fontSize: "1rem",
+                  outline: "none",
+                }}
+              />
+              <button
+                onClick={() => handleConnectButton(activeTabId)}
+                style={{
+                  padding: "10px",
+                  border: "none",
+                  borderRadius: "4px",
+                  background: "#7289da",
+                  color: "#fff",
+                  fontSize: "1rem",
+                  cursor: "pointer",
+                  fontWeight: "bold",
+                }}
+              >
+                {activeTab.connectButtonText}
+              </button>
+            </div>
+          </div>
+
           {/* Terminal */}
           <div style={{
             display: "flex",
@@ -182,26 +447,37 @@ const App = () => {
             margin: "0 auto",
             border: "1px solid #333",
             borderRadius: "8px",
-            background: "#2c2f33"
+            background: "#2c2f33",
+            overflow: "hidden",
           }}>
-            <Terminal lines={terminalLines} />
+            <Terminal lines={activeTab.terminalLines} />
             {/* Terminal Input */}
             <input
               type="text"
-              value={terminalData}
-              onChange={(e) => setTerminalData(e.target.value)}
+              value={activeTab.terminalData}
+              onChange={(e) =>
+                setTabs((prev) =>
+                  prev.map((tab) =>
+                    tab.id === activeTabId
+                      ? { ...tab, terminalData: e.target.value }
+                      : tab
+                  )
+                )
+              }
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  client?.messages.say(terminalData)
-                    .then(() => setTerminalData(""))
-                    .catch((error) => {
-                      setTerminalLines((prev) => [
-                        ...prev,
-                        "Failed to send message: " + error,
-                      ]);
+                  activeTab.client?.messages
+                    .say(activeTab.terminalData)
+                    .then(() => {
+                      setTabs((prev) =>
+                        prev.map((tab) =>
+                          tab.id === activeTabId
+                            ? { ...tab, terminalData: "" }
+                            : tab
+                        )
+                      );
                     });
-                }
-              }}
+              }}}
               placeholder="Type your message here..."
               style={{
                 width: "97.5%",
@@ -216,8 +492,9 @@ const App = () => {
               }}
             />
           </div>
+
           {/* Hints */}
-            <div
+          <div
             style={{
               display: "flex",
               flexDirection: "column",
@@ -226,7 +503,7 @@ const App = () => {
               width: "100%",
               paddingTop: "24px",
             }}
-            >
+          >
             <div
               style={{
                 display: "flex",
@@ -257,12 +534,12 @@ const App = () => {
                 <div style={{ flex: 1, textAlign: "center" }}>Status</div>
               </div>
               {/* Table Body */}
-              {hints.length === 0 ? (
+              {activeTab.hints.length === 0 ? (
                 <div style={{ color: "#aaa", padding: "24px", textAlign: "center" }}>
                   No hints available.
                 </div>
               ) : (
-                hints.map((row, idx) => {
+                activeTab.hints.map((row, idx) => {
                   // Determine color for item name based on item properties
                   const itemColor = row.item.progression
                       ? ColorCodes.PLUM
@@ -282,13 +559,13 @@ const App = () => {
                         background: idx % 2 === 0 ? "#2c2f33" : "#23272e",
                         color: "#fff",
                         padding: "10px 0",
-                        borderBottom: idx === hints.length - 1 ? "none" : "1px solid #333",
+                        borderBottom: idx === activeTab.hints.length - 1 ? "none" : "1px solid #333",
                       }}
                     >
-                      <div style={{ flex: 1, textAlign: "center", color: row.item.sender.alias === username ? "purple" : undefined }}>
+                      <div style={{ flex: 1, textAlign: "center", color: row.item.sender.alias === activeTab.username ? "purple" : undefined }}>
                         {row.item.sender.alias}
                       </div>
-                      <div style={{ flex: 1, textAlign: "center", color: row.item.receiver.alias === username ? "purple" : undefined }}>
+                      <div style={{ flex: 1, textAlign: "center", color: row.item.receiver.alias === activeTab.username ? "purple" : undefined }}>
                         {row.item.receiver.alias}
                       </div>
                       <div style={{ flex: 2, textAlign: "center", color: itemColor }}>
@@ -312,11 +589,24 @@ const App = () => {
               )}
             </div>
           </div>
-        </>
-      )}
-      {(!client || !client.socket.connected) && (
-        <div style={{ textAlign: "center", marginTop: "32px" }}>
-          <p>Disconnected from Archipelago</p>
+
+          {/* Delete Tab Button */}
+          <button
+            onClick={() => handleRemoveTab(activeTabId)}
+            style={{
+              marginTop: "16px",
+              padding: "10px",
+              border: "none",
+              borderRadius: "4px",
+              background: "#ff4d4d",
+              color: "#fff",
+              fontSize: "1rem",
+              cursor: "pointer",
+              fontWeight: "bold",
+            }}
+          >
+            Delete Tab
+          </button>
         </div>
       )}
     </div>
