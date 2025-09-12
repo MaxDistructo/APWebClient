@@ -11,7 +11,6 @@ interface Tab {
   password: string;
   terminalLines: string[];
   hints: Hint[];
-  client: Client | null;
   connectButtonText: string;
   terminalData: string;
 }
@@ -19,13 +18,17 @@ interface Tab {
 const LOCAL_STORAGE_KEY = "archipelago_tabs";
 
 const App = () => {
+  const [clients, setClients] = useState<Map<number, Client>>(new Map());
   const [tabs, setTabs] = useState<Tab[]>(() => {
     const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // Ensure client is null on load
-        return parsed.map((tab: any) => ({ ...tab, client: null }));
+        // Ensure client is null on load (clients managed separately now)
+        return parsed.map((tab: any) => {
+          const { client, ...tabWithoutClient } = tab;
+          return tabWithoutClient;
+        });
       } catch {
         return [
           {
@@ -36,7 +39,6 @@ const App = () => {
             password: "",
             terminalLines: [],
             hints: [],
-            client: null,
             connectButtonText: "Connect",
             terminalData: "",
           },
@@ -52,7 +54,6 @@ const App = () => {
         password: "",
         terminalLines: [],
         hints: [],
-        client: null,
         connectButtonText: "Connect",
         terminalData: "",
       },
@@ -62,8 +63,175 @@ const App = () => {
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
+  const updateClientTags = async (tabId: number, tags: string[]) => {
+    const client = clients.get(tabId);
+    const tab = tabs.find(t => t.id === tabId);
+    
+    if (client && client.socket.connected && tab) {
+      // Disconnect and reconnect with new tags
+      client.socket.disconnect();
+      
+      // Create new client with updated tags
+      const newClient = createClient(tabId);
+      
+      try {
+        await newClient.login(tab.serverUrl, tab.username, undefined, {
+          slotData: false,
+          password: tab.password,
+          tags: tags
+        });
+
+        // Update client in the map
+        setClients(prev => new Map(prev).set(tabId, newClient));
+      } catch (error: any) {
+        console.error("Failed to reconnect with new tags:", error);
+      }
+    }
+  };
+
   const handleTabChange = (id: number) => {
+    const previousTabId = activeTabId;
     setActiveTabId(id);
+    
+    // Update tags for the previously active tab (add NoText)
+    if (previousTabId !== id) {
+      updateClientTags(previousTabId, ["Tracker", "NoText"]);
+      
+      // Update tags for the newly active tab (remove NoText)
+      updateClientTags(id, ["Tracker", "TextOnly"]);
+    }
+  };
+
+  // Centralized client management
+  const createClient = (tabId: number): Client => {
+    const client = new Client();
+    
+    // Setup message listener
+    client.messages.on("message", (_message: string, nodes: MessageNode[]) => {
+      const line = nodes
+        .map((node) => {
+          let color;
+          let text = node.text ?? "";
+
+          // These colors match Clique, no clue if we should be doing something different
+          if (node.type === "color" && node.color && node.text) {
+            color = node.color.toUpperCase();
+          } else if (
+            node.type === "player" &&
+            node.player.slot === client.players.self.slot
+          ) {
+            color = ColorCodes.MAGENTA;
+          } else if (node.type === "player") {
+            color = ColorCodes.YELLOW;
+          } else if (node.type === "item" && node.item.useful) {
+            color = ColorCodes.SLATEBLUE;
+          } else if (node.type === "item" && node.item.progression) {
+            color = ColorCodes.PLUM;
+          } else if (node.type === "item" && node.item.trap) {
+            color = ColorCodes.RED;
+          } else if (node.type === "item") {
+            color = ColorCodes.CYAN;
+          } else if (node.type === "location") {
+            color = ColorCodes.GREEN;
+          }
+
+          if (color) {
+            return text
+              .split(" ")
+              .map((word) => (word ? `#${color}${word}` : ""))
+              .join(" ");
+          }
+          return text;
+        })
+        .join("");
+      
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId
+            ? { ...t, terminalLines: [...t.terminalLines, line] }
+            : t
+        )
+      );
+    });
+
+    // Setup hints listener
+    client.items.on("hintsInitialized", (hints: Hint[]) => {
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId ? { ...t, hints } : t
+        )
+      );
+    });
+
+    return client;
+  };
+
+  const connectClient = async (tabId: number, serverUrl: string, username: string, password: string, isActiveTab: boolean) => {
+    // Disconnect any existing client for this tab
+    const existingClient = clients.get(tabId);
+    if (existingClient && existingClient.socket.connected) {
+      existingClient.socket.disconnect();
+    }
+
+    // Create new client
+    const client = createClient(tabId);
+    
+    // Determine tags based on whether tab is active
+    const tags = isActiveTab ? ["Tracker", "TextOnly"] : ["Tracker", "NoText"];
+
+    try {
+      await client.login(serverUrl, username, undefined, {
+        slotData: false,
+        password: password,
+        tags: tags
+      });
+
+      // Store client in the map
+      setClients(prev => new Map(prev).set(tabId, client));
+      
+      // Update tab connection status
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId
+            ? { ...t, connectButtonText: "Disconnect" }
+            : t
+        )
+      );
+    } catch (error: any) {
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId
+            ? {
+                ...t,
+                terminalLines: [
+                  ...t.terminalLines,
+                  "Failed to connect: " + error,
+                ],
+              }
+            : t
+        )
+      );
+    }
+  };
+
+  const disconnectClient = (tabId: number) => {
+    const client = clients.get(tabId);
+    if (client && client.socket.connected) {
+      client.socket.disconnect();
+      setClients(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(tabId);
+        return newMap;
+      });
+      
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId
+            ? { ...t, connectButtonText: "Connect", hints: [], terminalLines: [] }
+            : t
+        )
+      );
+    }
   };
 
   const handleAddTab = () => {
@@ -75,7 +243,6 @@ const App = () => {
       password: "",
       terminalLines: [],
       hints: [],
-      client: null,
       connectButtonText: "Connect",
       terminalData: "",
     };
@@ -84,9 +251,18 @@ const App = () => {
   };
 
   const handleRemoveTab = (id: number) => {
+    // Disconnect the client for this tab if it exists
+    disconnectClient(id);
+    
+    // Remove the tab
     setTabs((prev) => prev.filter((tab) => tab.id !== id));
+    
+    // Update active tab if necessary
     if (activeTabId === id && tabs.length > 1) {
-      setActiveTabId(tabs[0].id);
+      const remainingTabs = tabs.filter(tab => tab.id !== id);
+      if (remainingTabs.length > 0) {
+        setActiveTabId(remainingTabs[0].id);
+      }
     }
   };
 
@@ -97,161 +273,33 @@ const App = () => {
   };
 
   const handleConnectButton = (id: number) => {
-    setTabs((prev) =>
-      prev.map((tab) => {
-        if (tab.id === id) {
-          // Disconnect if already connected
-          if (tab.client && tab.client.socket.connected) {
-            tab.client.socket.disconnect();
-            return {
-              ...tab,
-              connectButtonText: "Connect",
-              hints: [],
-              terminalLines: [],
-            };
-          }
+    const tab = tabs.find(t => t.id === id);
+    if (!tab) return;
 
-          // If client exists but is disconnected, reconnect
-          if (tab.client && !tab.client.socket.connected) {
-            tab.client
-              .login(tab.serverUrl, tab.username, undefined, {
-                slotData: false,
-                password: tab.password,
-              })
-              .then(() => {
-                setTabs((prev) =>
-                  prev.map((t) =>
-                    t.id === id
-                      ? { ...t, connectButtonText: "Disconnect" }
-                      : t
-                  )
-                );
-              })
-              .catch((error) => {
-                setTabs((prev) =>
-                  prev.map((t) =>
-                    t.id === id
-                      ? {
-                          ...t,
-                          terminalLines: [
-                            ...t.terminalLines,
-                            "Failed to connect: " + error,
-                          ],
-                        }
-                      : t
-                  )
-                );
-              });
-            return tab;
-          }
+    const client = clients.get(id);
+    
+    // If connected, disconnect
+    if (client && client.socket.connected) {
+      disconnectClient(id);
+      return;
+    }
 
-          // Otherwise, create a new client and attach listeners
-          const client = new Client();
-          if (!(client as any)._listenersAdded) {
-            (client as any)._listenersAdded = true;
-            client.messages.on(
-              "message",
-              (_message: string, nodes: MessageNode[]) => {
-                const line = nodes
-                  .map((node) => {
-                    let color;
-                    let text = node.text ?? "";
-
-                    if (node.type === "color" && node.color && node.text) {
-                      color = node.color.toUpperCase();
-                    } else if (
-                      node.type === "player" &&
-                      node.player.slot === client.players.self.slot
-                    ) {
-                      color = ColorCodes.MAGENTA;
-                    } else if (node.type === "player") {
-                      color = ColorCodes.YELLOW;
-                    } else if (node.type === "item" && node.item.useful) {
-                      color = ColorCodes.SLATEBLUE;
-                    } else if (node.type === "item" && node.item.progression) {
-                      color = ColorCodes.PLUM;
-                    } else if (node.type === "item" && node.item.trap) {
-                      color = ColorCodes.RED;
-                    } else if (node.type === "item") {
-                      color = ColorCodes.CYAN;
-                    } else if (node.type === "location") {
-                      color = ColorCodes.GREEN;
-                    }
-
-                    if (color) {
-                      return text
-                        .split(" ")
-                        .map((word) => (word ? `#${color}${word}` : ""))
-                        .join(" ");
-                    }
-                    return text;
-                  })
-                  .join("");
-                setTabs((prev) =>
-                  prev.map((t) =>
-                    t.id === id
-                      ? { ...t, terminalLines: [...t.terminalLines, line] }
-                      : t
-                  )
-                );
-              }
-            );
-
-            client.items.on("hintsInitialized", (hints: Hint[]) => {
-              setTabs((prev) =>
-                prev.map((t) =>
-                  t.id === id ? { ...t, hints } : t
-                )
-              );
-            });
-          }
-          client
-            .login(tab.serverUrl, tab.username, undefined, {
-              slotData: false,
-              password: tab.password,
-            })
-            .then(() => {
-              setTabs((prev) =>
-                prev.map((t) =>
-                  t.id === id
-                    ? { ...t, client, connectButtonText: "Disconnect" }
-                    : t
-                )
-              );
-            })
-            .catch((error) => {
-              setTabs((prev) =>
-                prev.map((t) =>
-                  t.id === id
-                    ? {
-                        ...t,
-                        terminalLines: [
-                          ...t.terminalLines,
-                          "Failed to connect: " + error,
-                        ],
-                      }
-                    : t
-                )
-              );
-            });
-          return { ...tab, client };
-        }
-        return tab;
-      })
-    );
+    // Connect with appropriate tags
+    const isActiveTab = id === activeTabId;
+    connectClient(id, tab.serverUrl, tab.username, tab.password, isActiveTab);
   };
 
-  // Save tabs to localStorage whenever they change (excluding client)
+  // Save tabs to localStorage whenever they change (clients managed separately)
   useEffect(() => {
-    const tabsToSave = tabs.map(({ client, ...rest }) => rest);
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(tabsToSave));
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(tabs));
   }, [tabs]);
 
-  // Auto-reconnect tabs with connection info but no client
+  // Auto-reconnect tabs with connection info but no active client
   useEffect(() => {
     tabs.forEach((tab) => {
+      const client = clients.get(tab.id);
       if (
-        !tab.client &&
+        (!client || !client.socket.connected) &&
         tab.serverUrl &&
         tab.username &&
         tab.password &&
@@ -262,6 +310,17 @@ const App = () => {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Cleanup all clients on component unmount
+  useEffect(() => {
+    return () => {
+      clients.forEach((client) => {
+        if (client && client.socket.connected) {
+          client.socket.disconnect();
+        }
+      });
+    };
+  }, [clients]);
 
   return (
     <div>
@@ -316,6 +375,21 @@ const App = () => {
           }}
         >
           +
+        </button>
+        <button
+          onClick={() => handleRemoveTab(activeTabId)}
+          style={{
+            padding: "8px 16px",
+            cursor: "pointer",
+            background: "#ff4d4d",
+            color: "#fff",
+            borderRadius: "4px",
+            border: "none",
+            fontSize: "16px",
+            flexShrink: 0,
+          }}
+        >
+          🗑️
         </button>
       </div>
 
@@ -466,7 +540,8 @@ const App = () => {
               }
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
-                  activeTab.client?.messages
+                  const client = clients.get(activeTabId);
+                  client?.messages
                     .say(activeTab.terminalData)
                     .then(() => {
                       setTabs((prev) =>
@@ -589,24 +664,6 @@ const App = () => {
               )}
             </div>
           </div>
-
-          {/* Delete Tab Button */}
-          <button
-            onClick={() => handleRemoveTab(activeTabId)}
-            style={{
-              marginTop: "16px",
-              padding: "10px",
-              border: "none",
-              borderRadius: "4px",
-              background: "#ff4d4d",
-              color: "#fff",
-              fontSize: "1rem",
-              cursor: "pointer",
-              fontWeight: "bold",
-            }}
-          >
-            Delete Tab
-          </button>
         </div>
       )}
     </div>
